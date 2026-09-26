@@ -1,0 +1,99 @@
+name: Build Zikr Modern APK
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch: {}
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Set up Java 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '17'
+
+      - name: Set up Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          channel: 'stable'
+
+      - name: Preserve our source files
+        run: |
+          mkdir -p /tmp/preserved
+          cp lib/main.dart /tmp/preserved/main.dart
+          cp pubspec.yaml /tmp/preserved/pubspec.yaml
+
+      - name: Scaffold native Android/iOS project (only if missing)
+        run: |
+          if [ ! -d "android" ]; then
+            flutter create --platforms=android,ios --org com.afzal --project-name zikr_modern .
+          fi
+
+      - name: Restore our source files
+        run: |
+          cp /tmp/preserved/main.dart lib/main.dart
+          cp /tmp/preserved/pubspec.yaml pubspec.yaml
+
+      - name: Patch AndroidManifest.xml with required permissions
+        run: |
+          python3 - <<'PY'
+          import re
+
+          manifest_path = "android/app/src/main/AndroidManifest.xml"
+          with open(manifest_path, "r") as f:
+              content = f.read()
+
+          permissions = """
+              <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
+              <uses-permission android:name="android.permission.WAKE_LOCK" />
+              <uses-permission android:name="android.permission.VIBRATE" />
+              <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+              <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+              <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
+              <uses-permission android:name="android.permission.SCHEDULE_EXACT_ALARM" />
+              <uses-permission android:name="android.permission.INTERNET" />
+          """
+
+          service_tag = """
+              <service
+                  android:name="flutter.overlay.window.flutter_overlay_window.OverlayService"
+                  android:exported="false"
+                  android:foregroundServiceType="specialUse" />
+          """
+
+          if "SYSTEM_ALERT_WINDOW" not in content:
+              content = re.sub(r"(<manifest[^>]*>)", r"\1" + permissions, content, count=1)
+
+          if "OverlayService" not in content:
+              content = content.replace("</application>", service_tag + "    </application>")
+
+          with open(manifest_path, "w") as f:
+              f.write(content)
+          PY
+
+      - name: Set minSdkVersion to 26
+        run: |
+          sed -i 's/minSdkVersion flutter.minSdkVersion/minSdkVersion 26/' android/app/build.gradle || true
+          sed -i 's/minSdk = flutter.minSdkVersion/minSdk = 26/' android/app/build.gradle.kts || true
+
+      - name: Install dependencies
+        run: flutter pub get
+
+      - name: Analyze (non-blocking)
+        run: flutter analyze || true
+
+      - name: Build debug-signed APK
+        run: flutter build apk --debug
+
+      - name: Upload APK artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: zikr-modern-debug-apk
+          path: build/app/outputs/flutter-apk/app-debug.apk
